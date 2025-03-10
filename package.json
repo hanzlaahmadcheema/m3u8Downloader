@@ -1,0 +1,13 @@
+{
+  "name": "ffmpeg-server",
+  "version": "1.0.0",
+  "description": "FFmpeg server to download M3U8 as MP4",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "fluent-ffmpeg": "^2.1.3"
+  }
+}
