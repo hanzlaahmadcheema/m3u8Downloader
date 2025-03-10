@@ -11,9 +11,9 @@ app.use(express.static("downloads"));
 
 // Endpoint to download and convert M3U8
 app.get("/download", async (req, res) => {
-  const episodeUrl = req.query.episodeUrl;
+  const episodeUrl = req.query.Url;
   if (!episodeUrl) {
-    return res.status(400).json({ error: "Episode URL is required" });
+    return res.status(400).json({ error: "URL is required" });
   }
 
   const outputFilename = `episode-${Date.now()}.mp4`;
