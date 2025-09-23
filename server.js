@@ -4,44 +4,42 @@ const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
 const { spawn } = require("child_process");
-const AWS = require("aws-sdk");
+const oci = require("oci-sdk"); // Oracle SDK
 
 const app = express();
 const PORT = process.env.PORT || 3002;
-
-// Cloudflare R2 Configuration
-const s3 = new AWS.S3({
-  endpoint: process.env.R2_ENDPOINT,
-  accessKeyId: process.env.R2_ACCESS_KEY,
-  secretAccessKey: process.env.R2_SECRET_KEY,
-  signatureVersion: "v4",
-});
-
-// Bucket Names
-const BUCKET_PRIMARY = process.env.BUCKET_PRIMARY;
-const BUCKET_USER = process.env.BUCKET_USER;
 
 app.use(express.json());
 app.use(cors({ origin: "*" })); // Allow all origins
 
 let progressData = {}; // Store progress for each file
 
-// Function to check if file exists in an R2 bucket
+// Oracle Cloud Configuration
+const provider = new oci.common.ConfigFileAuthenticationDetailsProvider("~/.oci/config");
+const objectStorageClient = new oci.objectstorage.ObjectStorageClient({
+  authenticationDetailsProvider: provider,
+});
+
+// Bucket Names
+const namespace = process.env.OCI_NAMESPACE;
+const BUCKET_PRIMARY = process.env.BUCKET_PRIMARY; // Main bucket
+const BUCKET_USER = process.env.BUCKET_USER; // User-upload bucket
+
+// Function to check if a file exists in Oracle Storage
 async function checkFileInBucket(bucket, fileName) {
   try {
-    await s3
-      .headObject({
-        Bucket: bucket,
-        Key: `${fileName}.mp4`,
-      })
-      .promise();
+    await objectStorageClient.headObject({
+      namespaceName: namespace,
+      bucketName: bucket,
+      objectName: `${fileName}.mp4`,
+    });
     return true; // File exists
   } catch (error) {
     return false; // File not found
   }
 }
 
-// Route to check if file exists in R2 storage
+// Route to check if a file exists
 app.get("/check-file", async (req, res) => {
   const { fileName } = req.query;
 
@@ -50,18 +48,18 @@ app.get("/check-file", async (req, res) => {
     const existsUser = await checkFileInBucket(BUCKET_USER, fileName);
 
     if (existsPrimary || existsUser) {
-      console.log(`File ${fileName}.mp4 found in R2.`);
+      console.log(`File ${fileName}.mp4 found in Oracle Storage.`);
       return res.json({ exists: true });
     }
 
     res.json({ exists: false });
   } catch (error) {
-    console.error("Error checking file in R2:", error);
+    console.error("Error checking file:", error);
     res.status(500).json({ success: false, error: "Error checking file." });
   }
 });
 
-// Route to download and convert M3U8 to MP4, then upload to R2
+// Route to download and convert M3U8 to MP4, then upload to Oracle Storage
 app.post("/download", async (req, res) => {
   const { episodeUrl, fileName } = req.body;
   const tempFilePath = path.join(__dirname, `${fileName}.mp4`);
@@ -71,12 +69,12 @@ app.post("/download", async (req, res) => {
   }
 
   try {
-    // Check if file exists in either bucket before downloading
+    // Check if the file already exists
     const existsPrimary = await checkFileInBucket(BUCKET_PRIMARY, fileName);
     const existsUser = await checkFileInBucket(BUCKET_USER, fileName);
 
     if (existsPrimary || existsUser) {
-      console.log(`Skipping download, ${fileName}.mp4 already exists in R2.`);
+      console.log(`Skipping download, ${fileName}.mp4 already exists.`);
       return res.json({ success: true, message: "File already exists" });
     }
 
@@ -126,18 +124,18 @@ app.post("/download", async (req, res) => {
         progressData[fileName].progress = 100;
         console.log(`Download completed: ${fileName}.mp4`);
 
-        // Upload to Cloudflare R2 (user-episodes bucket)
+        // Upload to Oracle Cloud
         const fileStream = fs.createReadStream(tempFilePath);
-        await s3
-          .upload({
-            Bucket: BUCKET_USER,
-            Key: `${fileName}.mp4`,
-            Body: fileStream,
-            ContentType: "video/mp4",
-          })
-          .promise();
+        const uploadDetails = {
+          namespaceName: namespace,
+          bucketName: BUCKET_USER,
+          objectName: `${fileName}.mp4`,
+          putObjectBody: fileStream,
+          contentType: "video/mp4",
+        };
 
-        console.log(`Uploaded to R2: ${fileName}.mp4`);
+        await objectStorageClient.putObject(uploadDetails);
+        console.log(`Uploaded to Oracle: ${fileName}.mp4`);
         fs.unlinkSync(tempFilePath); // Remove temporary file
       } else {
         console.error(`FFmpeg error: Process exited with code ${code}`);
@@ -159,7 +157,7 @@ app.get("/progress/:fileName", (req, res) => {
   res.json({ progress });
 });
 
-// Route to serve MP4 files from Cloudflare R2
+// Route to serve MP4 files from Oracle Cloud
 app.get("/download/:fileName", async (req, res) => {
   const { fileName } = req.params;
 
@@ -171,12 +169,7 @@ app.get("/download/:fileName", async (req, res) => {
       return res.status(404).json({ error: "File not found" });
     }
 
-    // Generate a signed URL for direct download
-    const url = s3.getSignedUrl("getObject", {
-      Bucket: existsPrimary ? BUCKET_PRIMARY : BUCKET_USER,
-      Key: `${fileName}.mp4`,
-      Expires: 3600, // 1 hour expiry
-    });
+    const url = `https://objectstorage.${process.env.OCI_REGION}.oraclecloud.com/n/${namespace}/b/${existsPrimary ? BUCKET_PRIMARY : BUCKET_USER}/o/${fileName}.mp4`;
 
     console.log(`Serving download link: ${url}`);
     res.json({ success: true, url });
